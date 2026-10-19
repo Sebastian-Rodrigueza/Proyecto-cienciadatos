@@ -1,0 +1,24 @@
+# Datos crudos de CAMELS-COL (3,5 GB): se descargan desde Zenodo, ver README
+Camels col/
+
+# Archivos temporales de Office y Jupyter
+~$*
+.ipynb_checkpoints/
+__pycache__/
+
+# Archivos de trabajo que no forman parte de la entrega
+proyecto fase 1 (version anterior).docx
+CLAUDE.md
+explorar_camels_col.py
+proyecto fase 1.docx
+proyecto fase 1 (vista previa).pdf
+proyecto_notebook.zip
+salidas/eda_resultados.json
+salidas/fig_eda.png
+
+# Por ahora fuera del repositorio (se suben más adelante)
+mockup_producto.py
+USO_IA.md
+README.md
+salidas/
+referencias/

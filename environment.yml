@@ -1,0 +1,30 @@
+# Entorno para trabajar con el dataset CAMELS-COL (MINE-4101)
+# Crear:      conda env create -f environment.yml
+# Activar:    conda activate proyecto
+# Actualizar: conda env update -f environment.yml --prune
+name: proyecto
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  # Datos y cálculo
+  - pandas
+  - numpy
+  - openpyxl          # leer el diccionario de atributos (.xlsx)
+  - pypdf             # extraer texto de los papers en referencias/
+  - python-docx       # generar los documentos de entrega (.docx)
+  # Estadística y modelos
+  - scipy
+  - statsmodels
+  - scikit-learn
+  # Visualización
+  - matplotlib
+  - seaborn
+  - plotly
+  # Datos espaciales (shapefiles de cuencas/red de drenaje y rasters TWI)
+  - geopandas
+  - rasterio
+  - pyproj
+  # Notebooks
+  - jupyterlab
+  - ipykernel
