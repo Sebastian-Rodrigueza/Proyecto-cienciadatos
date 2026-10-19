@@ -41,7 +41,7 @@ análisis exploratorio y de calidad. El reporte está en el documento PDF: `Repo
 | `referencias/` | Artículo de datos de CAMELS-COL (preprint ESSD) |
 | `environment.yml` | Definición del entorno de software |
 | `USO_IA.md` | Declaración del uso de inteligencia artificial |
-| `Video Ciencia de Datos.mp4` | Video introductorio del producto de datos |
+| `Video Ciencia de Datos` | Video introductorio del producto de datos |
 
 ## Datos
 
