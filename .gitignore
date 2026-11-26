@@ -1,6 +1,9 @@
 # Datos crudos de CAMELS-COL (3,5 GB): se descargan desde Zenodo, ver README
 Camels col/
 
+# Entorno local de conda (environment.yml)
+proyecto/
+
 # Archivos temporales de Office y Jupyter
 ~$*
 .ipynb_checkpoints/
