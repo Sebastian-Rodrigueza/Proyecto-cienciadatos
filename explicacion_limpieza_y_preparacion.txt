@@ -1,0 +1,226 @@
+LIMPIEZA Y PREPARACIÓN DE LOS DATOS: QUÉ HICIMOS Y QUÉ NECESITAN PARA EL 5 %
+
+Este texto es para quienes van a hacer el ítem 9 de la rúbrica de la entrega final
+("Estrategia de validación y selección de modelo", 5 %). Ese ítem pide tres cosas:
+definir cómo vamos a entrenar y escoger el mejor modelo, separar los datos en
+entrenamiento, validación y prueba, y hacer un reporte corto que verifique que la
+distribución de los subconjuntos se parece a la del conjunto original.
+
+Para hacerlo bien hay que entender qué datos quedaron después de la limpieza y la
+preparación, y qué decisiones ya están tomadas. Eso es lo que sigue. Todo lo que
+digo aquí está calculado en los notebooks; al final les cuento dónde.
+
+
+1. LOS DATOS DE PARTIDA
+
+Usamos CAMELS-COL versión 3: 346 cuencas de Colombia, cada una con una serie diaria
+de 1981 a 2022 (lluvia, temperatura mínima y máxima, evapotranspiración potencial y
+caudal) y una tabla de atributos fijos de la cuenca (geología, suelos, cobertura,
+clima, forma y uso del suelo).
+
+Lo que queremos estimar es el caudal diario de una cuenca, incluso de las que no
+tienen estación de aforo. Esa última parte importa mucho para la validación, como
+explico más abajo.
+
+
+2. LIMPIEZA DE LAS SERIES (las 346 cuencas)
+
+Hicimos cuatro cosas, todas en codigo/limpiar_series.py:
+
+a) Calendario continuo. Los archivos originales no traen fila para los días sin dato,
+así que los vacíos no se veían. Reindexamos cada serie a un día por fila. Se
+agregaron 275.112 filas (6,3 % del total) que quedan con valor vacío en todas las
+variables. No imputamos nada. El 80,6 % de esos días faltantes está en vacíos de más
+de 30 días y 119 vacíos pasan de un año; no hay de dónde rellenar, y probamos que la
+lluvia no mejora ni con interpolación ni con la mediana.
+
+b) Evapotranspiración. La ETP que trae el dataset está sobreestimada (con ella 309 de
+las 346 cuencas salen como áridas). La reemplazamos por la de Hargreaves, calculada
+con temperatura mínima, máxima, latitud y día del año. Queda en cerca del 37 % de la
+original y con ella solo 18 cuencas salen áridas.
+
+c) Valores congelados. Si el caudal repite exactamente el mismo valor 30 días o más
+seguidos, lo tratamos como un sensor pegado y ese caudal pasa a vacío. Son 7.366
+días (0,17 %).
+
+d) Picos aislados. Si el caudal de un día es más de 10 veces el mayor de sus dos
+vecinos, lo tratamos como error y pasa a vacío. Son 663 días (0,015 %). Ojo con esta:
+el 74 % de esos picos tiene lluvia fuerte ese día o el anterior, así que una parte
+puede ser una creciente real. Decidimos mantener la regla porque reproduce la
+limpieza anterior del equipo y toca muy pocos días, pero hay que decirlo como
+limitación.
+
+Cada día de caudal queda con un estado en la columna Caudal_estado: "ok" (se usa),
+"no_data" (día agregado por el calendario), "frozen" o "spike". Solo los días "ok"
+sirven para entrenar y para medir.
+
+Los umbrales de 30 días y de 10 veces no salen de ningún libro; los justificamos con
+los datos (están en notebooks/limpieza_series.ipynb). Los manuales de control de
+calidad que consultamos (NOAA IOOS 2018 y otros) respaldan los conceptos de línea
+plana y de pico, pero dejan los umbrales a criterio de quien limpia.
+
+
+3. DESCARTE DE CUENCAS (de 346 a 248)
+
+Una cuenca se descarta si tiene cualquiera de seis banderas:
+
+  - Caudal mayor que la lluvia (55 cuencas). En el largo plazo sale por el río menos
+    agua de la que llueve, así que Q/P no puede pasar de 1.
+  - Régimen del caudal distinto al de la lluvia (20).
+  - Caudal plano: 10 % o más de los días están en rachas de 7 o más días iguales (19).
+  - Cuenca anidada con caudales que no cuadran con la de aguas arriba (13).
+  - Contorno de la cuenca mal trazado (6).
+  - Dos estaciones casi en el mismo punto con datos que no coinciden (5).
+
+Hay 16 cuencas con más de una bandera. Quedan 248 cuencas: 136 de Magdalena-Cauca,
+37 del Orinoco, 44 del Caribe, 20 del Pacífico y 11 del Amazonas. El Amazonas y el
+Pacífico quedan con pocas, y eso hay que tenerlo presente al repartir los datos.
+
+Dos banderas las calculamos nosotros (caudal mayor que lluvia y caudal plano). Las
+otras cuatro son criterio del equipo que hizo la limpieza anterior y no se pueden
+recalcular con los datos del repositorio. Tampoco encontramos un documento publicado
+que respalde estas seis pruebas; son criterios físicos razonables, y así hay que
+presentarlas. La lista final está en salidas/cuencas_modelado.csv.
+
+Ninguna cuenca se descartó por tener pocos años: las 248 tienen al menos 11 años de
+caudal válido.
+
+
+4. QUÉ ENTRA AL MODELO
+
+Cada fila es un día de una cuenca. Lo que queremos predecir es el caudal específico,
+q = Q x 86,4 / área, en milímetros por día. Se expresa por área para poder comparar
+cuencas pequeñas y grandes.
+
+Importante: no usamos el caudal de días anteriores como entrada. Si lo usáramos, el
+modelo no serviría para cuencas sin estación, que es justo el caso de uso. La memoria
+de la cuenca la damos con lluvia acumulada.
+
+Variables de la serie (13):
+  - lluvia del día y lluvia acumulada de 3, 7, 30 y 90 días (P, P3, P7, P30, P90)
+  - temperatura media y rango de temperatura (Tmean, Trango)
+  - ETP del día y su media de 30 días (ETP, ETP30)
+  - estacionalidad: seno y coseno del día del año, con uno y con dos ciclos al año
+    (sin_doy, cos_doy, sin2_doy, cos2_doy). El segundo ciclo sirve para las regiones
+    con dos temporadas de lluvia, como Magdalena-Cauca y el Caribe.
+
+Atributos de la cuenca (53), más la región en una columna por región (one-hot).
+A los atributos les quitamos: las firmas hidrológicas del archivo 09 (se calculan con
+el caudal observado y le filtrarían la respuesta al modelo), cinco columnas
+duplicadas y dos constantes. La aridez la recalculamos con la ETP de Hargreaves. Las
+variables muy sesgadas, como el área, van en logaritmo.
+
+Una ventana de lluvia acumulada que tenga algún día vacío se descarta, no se imputa.
+Por eso de 2.976.524 días con caudal bueno quedan 2.483.808 filas utilizables (se
+pierde el 16,6 %). La mayor parte de esa pérdida es por la ventana de 90 días.
+
+Preprocesamiento (como en la Práctica 6): a las variables numéricas, imputación con
+la mediana y estandarización (media 0, desviación 1); a la región, one-hot. Se ajusta
+solo con datos de entrenamiento para que nada de validación o prueba se cuele.
+
+
+5. LA PARTICIÓN QUE DEJAMOS COMO BORRADOR
+
+Ya hay una propuesta en notebooks/validacion_particion.ipynb. Es un punto de partida,
+no una decisión cerrada. Lo que hace:
+
+  - Parte cada cuenca por separado y en orden cronológico: el primer 60 % de sus días
+    con caudal es entrenamiento, el siguiente 20 % validación y el último 20 % prueba.
+  - No es aleatoria porque el caudal de un día se parece mucho al del día anterior. Si
+    mezcláramos los días al azar, el modelo vería en el entrenamiento días casi
+    iguales a los de la prueba y los resultados saldrían mejores de lo real.
+  - Con esto las 248 cuencas aparecen en las tres partes. Probamos antes una prueba
+    fija en 2016-2022 y no sirve: 61 cuencas (25 %) quedaban con menos de un año de
+    caudal en ese periodo, porque muchas dejaron de medir antes. Mover la fecha
+    tampoco lo arregla (aun desde 2010 quedan 34 fuera).
+
+Lo que da el borrador: queda 63 % / 18 % / 18 % de las filas (no 60/20/20 exacto,
+porque las ventanas con huecos se pierden más en validación y prueba). La prueba
+empieza hacia 2013 para la cuenca mediana. Las distribuciones se parecen: la
+diferencia KS del caudal es 0,044 entre entrenamiento y validación y 0,012 entre
+entrenamiento y prueba; la de la lluvia es 0,012 y 0,023. Son diferencias pequeñas.
+
+Una limitación que hay que decir en el reporte: como cada cuenca se corta en su
+propia fecha, no todas se evalúan en el mismo periodo del calendario, así que los
+resultados mezclan épocas climáticas distintas.
+
+
+6. LO QUE FALTA PARA EL 5 %
+
+Esto es lo que yo haría, y es lo que todavía está abierto:
+
+a) Validación para cuencas sin estación. La partición cronológica mide qué tan bien
+estimamos cuencas que el modelo ya vio. Pero el KPI de la propuesta habla de cuencas
+no vistas. Hace falta una validación cruzada espacial: dejar cuencas enteras por
+fuera del entrenamiento (por ejemplo GroupKFold por cuenca, repartiendo las regiones
+de forma pareja). Ojo con las cuencas anidadas: si una cuenca grande contiene a una
+pequeña y quedan en lados distintos, la evaluación sale optimista. La relación de
+anidamiento no está en el repositorio; habría que pedirla al compañero que hizo la
+limpieza anterior o agrupar por código de estación.
+
+b) Cómo escoger el mejor modelo. Lo que usamos hasta ahora: ajustar los
+hiperparámetros contra la partición de validación (en scikit-learn, GridSearchCV con
+PredefinedSplit) y mirar la prueba solo al final. La validación cruzada con mezcla
+aleatoria que se ve en clase no se debe usar aquí por lo que explico en el punto 5.
+
+c) Métricas. Se calculan por cuenca y se resumen con la mediana nacional y por
+región: NSE y KGE (1 es perfecto; NSE de 0 o menos no mejora al caudal medio), RMSE y
+MAE en mm/día. Los KPIs de negocio están definidos en el documento de la propuesta
+(error de volumen mensual y detección de crecientes).
+
+d) El reporte de que las distribuciones se conservan. El del notebook compara
+entrenamiento contra validación y prueba. La rúbrica dice "respecto al conjunto
+original", así que conviene agregar la comparación contra el conjunto completo, y
+mirarla por región y por algunas variables clave (lluvia acumulada, aridez, área),
+además de comprobar que la proporción de cuencas por región se mantiene.
+
+e) Decidir si se mantiene el 60/20/20 por cuenca o se cambia. Es una decisión del
+grupo; lo importante es poder justificarla.
+
+
+7. COSAS QUE HAY QUE TENER PRESENTES
+
+  - Las metas de los KPIs (por ejemplo, que el 70 % de las cuencas tenga error de
+    volumen mensual de 15 % o menos) eran propuestas por validar. En una prueba rápida
+    que hicimos con varios modelos, no se cumplieron. Conviene revisarlas.
+  - Los notebooks modelado_ia y validacion_particion se ejecutaron antes de
+    los últimos cambios de la preparación (agregamos el segundo ciclo estacional y
+    quitamos atributos). Si los van a usar, vuelvan a ejecutarlos.
+  - El modelo de la propuesta incluía un LSTM. No lo vimos en clase; hay que avisar a
+    los docentes antes de usarlo.
+  - Las series de las 98 cuencas descartadas siguen existiendo en salidas/series_limpias,
+    pero no deben usarse. Para modelar, filtren siempre con salidas/cuencas_modelado.csv.
+
+
+8. DÓNDE ESTÁ TODO Y CÓMO CORRERLO
+
+Carpeta del proyecto: Ciencia de datos.
+
+Notebooks (carpeta notebooks):
+  - limpieza_series.ipynb: cada regla de limpieza con su fórmula, sus fuentes y qué
+    pasa si se cambian los umbrales.
+  - preparacion_datos.ipynb: el proceso completo de preparación con gráficas y las
+    decisiones de cada paso (es el del ítem 8).
+  - validacion_particion.ipynb: el borrador de la partición y su verificación (punto
+    de partida del ítem 9).
+  - modelado_ia.ipynb: una prueba de modelos que no es parte de este ítem.
+
+Código (carpeta codigo): limpiar_series.py, aplicar_banderas.py y preparar_datos.py
+(funciones compartidas: atributos, variables de la serie, partición, preprocesamiento
+y métricas). Los notebooks se generan desde los scripts crear_*.py; si quieren
+cambiar un notebook, cambien el script y vuelvan a generarlo.
+
+Resultados (carpeta salidas): series_limpias (las 346 series), cuencas_modelado.csv
+(las 248), banderas_descarte.csv (por qué se descartó cada una) y datos_preparados
+(atributos, diccionario de variables, figuras).
+
+Para reproducir, desde la carpeta del proyecto y con el entorno de conda "proyecto"
+activado, en este orden:
+    python codigo/limpiar_series.py
+    python codigo/aplicar_banderas.py
+y después ejecutar los notebooks en Jupyter. Se necesita tener la carpeta
+"Camels col" con los datos crudos (se descarga de Zenodo con
+codigo/descargar_datos.py). El primer script tarda unos minutos.
+
+El diccionario de las variables que entran al modelo está en diccionario_datos.md
+(sección 12) y en salidas/datos_preparados/diccionario_variables_preparadas.csv.

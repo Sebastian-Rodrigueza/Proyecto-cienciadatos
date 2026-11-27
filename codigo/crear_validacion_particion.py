@@ -11,32 +11,30 @@ BASE = Path(__file__).resolve().parent.parent
 DESTINO = BASE / "notebooks/validacion_particion.ipynb"
 
 CELDAS = [
-    ("md", r"""# Estrategia de validación y selección de modelo (entrega final, ítem 9)
+    ("md", r"""# Estrategia de validación y selección de modelo
 
-La rúbrica pide tres cosas: **(1)** definir la estrategia de experimentación para entrenar y escoger el mejor modelo del producto de datos, **(2)** con esa estrategia separar los datos en entrenamiento, validación y prueba, y **(3)** un reporte breve que verifique que la distribución de los subconjuntos se conserva respecto al conjunto original.
+El producto estima el caudal diario de cuencas colombianas, **también donde no hay estación**. Por lo que se definen dos preguntas de evaluación, cada una con su propia partición y KPIs:
 
-El producto estima el caudal diario de cuencas colombianas, **también donde no hay estación**. Hay entonces dos preguntas de evaluación, y cada una necesita su propia partición:
-
-| Pregunta | Partición | KPI del primer reporte |
+| Pregunta | Partición | Criterio (Tabla 4 del primer reporte) |
 |---|---|---|
-| ¿Qué tan bien estima días futuros de cuencas que el modelo ya vio? | **Temporal**: 60/20/20 cronológico dentro de cada cuenca | P4: NSE y KGE medianos ≥ 0,70 |
-| ¿Sirve en cuencas que nunca vio (sin estación)? | **Espacial**: 5 folds de cuencas completas, sin separar cuencas anidadas | P6: NSE mediano ≥ 0,50 |
+| ¿Qué tan bien estima días futuros de cuencas que el modelo ya vio? | **Temporal**: 60/20/20 cronológico dentro de cada cuenca | **P1**: NSE y KGE medianos ≥ 0,70; KPIs 1 y 2 en meta |
+| ¿Sirve en cuencas que nunca vio (sin estación)? | **Espacial**: 5 folds de cuencas completas, sin separar cuencas anidadas | **P2**: NSE mediano ≥ 0,50, también por región |
 
-**Entradas.** Las filas preparadas en `preparacion_datos.ipynb` (ítem 8): 248 cuencas, un día por fila, caudal específico $q$ [mm/día] como objetivo y sin caudal de días anteriores como entrada. Funciones: `codigo/preparar_datos.py` (filas, partición temporal, métricas) y `codigo/validacion.py` (cuencas anidadas, folds, distribuciones, selección).
+**P3** (¿el LSTM agrega valor frente a la regresión lineal y al Random Forest?) no tiene partición propia: compara los modelos cuenca por cuenca sobre las predicciones de P1 y P2 con **bootstrap pareado** de la diferencia de NSE (criterio: el IC 95 % excluye 0 y la mejora mediana es ≥ 0,10). Como pide el primer reporte, cada resultado se acompaña de su intervalo de confianza del 95 % por bootstrap.
 
-**Fuentes externas.** [1] Roberts et al., *Cross-validation strategies for data with temporal, spatial, hierarchical, or phylogenetic structure*, Ecography 40, 2017. [2] Kratzert et al., *Toward improved predictions in ungauged basins: exploiting the power of machine learning*, Water Resour. Res. 55, 2019. [3] Siddiqi, *Credit Risk Scorecards*, Wiley, 2006 (índice de estabilidad poblacional). [4] Nash y Sutcliffe, J. Hydrol. 10, 1970; Gupta et al., J. Hydrol. 377, 2009 (NSE y KGE).
+**Entradas.** Las filas preparadas en `preparacion_datos.ipynb`, compuestas por 248 cuencas, un día por fila, caudal específico $q$ [mm/día] como objetivo y sin caudal de días anteriores como entrada. Funciones: `codigo/preparar_datos.py` (filas, partición temporal, métricas) y `codigo/validacion.py` (cuencas anidadas, folds, distribuciones, selección).
+
+**Fuentes externas.** [1] Roberts et al., *Cross-validation strategies for data with temporal, spatial, hierarchical, or phylogenetic structure*, Ecography 40, 2017. [2] Kratzert et al., *Toward improved predictions in ungauged basins: exploiting the power of machine learning*, Water Resour. Res. 55, 2019. [3] Siddiqi, *Credit Risk Scorecards*, Wiley, 2006 (índice de estabilidad poblacional). [4] Nash y Sutcliffe, J. Hydrol. 10, 1970; Gupta et al., J. Hydrol. 377, 2009 (NSE y KGE). [5] Efron y Tibshirani, *An Introduction to the Bootstrap*, Chapman & Hall, 1993.
 
 | Sección | Qué se hace |
 |---|---|
 | 1 | Por qué no se parte al azar (autocorrelación y un experimento) |
 | 2 | Partición temporal: por qué no la fecha fija del primer reporte y cómo queda |
-| 3 | Validación cruzada espacial: cuencas anidadas, folds y cobertura residual |
+| 3 | Validación cruzada espacial: cuencas anidadas, folds, cobertura residual, fechas compartidas y comprobación con sistemas de ríos completos |
 | 4 | Verificación de que las distribuciones se conservan (temporal y espacial) |
-| 5 | Estrategia de selección del modelo y línea base con el protocolo |
-| 6 | Archivos para el modelado |
-| 7 | Lo que pide el ítem 9 y limitaciones |"""),
-
-    ("md", "## 0. Configuración del entorno"),
+| 5 | Estrategia de selección del modelo, línea base con el protocolo e intervalos por bootstrap |
+| 6 | Archivos para el modelado |"""),
+    ("md", r"""## 0. Configuración del entorno"""),
     ("code", r"""import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -44,7 +42,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 
@@ -69,9 +67,10 @@ filas, resumen = pdat.construir_filas(est, areas)
 filas["particion"] = pd.Categorical(filas.particion, categories=val.PERIODOS)
 filas["region"] = filas.gauge_id.map(region)
 print(f"{len(est)} cuencas, {len(filas):,} filas utilizables")"""),
-
     ("md", r"""## 1. Por qué no se parte al azar
-La validación cruzada con mezcla aleatoria supone que las filas son independientes. En una serie de caudal no lo son: el caudal de hoy se parece al de ayer. Si los días se reparten al azar, cada día de evaluación tiene a sus vecinos en el entrenamiento y el modelo parece mejor de lo que es [1].
+La forma más sencilla de dividir los datos es aleatoriamente, sin embargo, en este dominio específico no es posible.
+
+La validación cruzada con mezcla aleatoria supone que las filas son independientes. En una serie de caudal no lo son porque el caudal de hoy se parece al de ayer. Si los días se reparten al azar, cada día de evaluación tiene a sus vecinos en el entrenamiento y el modelo parece mejor de lo que es [1].
 
 ### 1a. Autocorrelación del caudal
 Para cada cuenca se calcula la correlación entre $q(t)$ y $q(t-k)$ y se resume con la mediana entre cuencas."""),
@@ -89,7 +88,9 @@ ax.plot(REZAGOS, tac.mediana, "o-", color="#2a78d6"); ax.fill_between(REZAGOS, t
 ax.set(xscale="log", xlabel="Rezago k [días]", ylabel="corr(q(t), q(t−k))", title="Autocorrelación del caudal (mediana y p10–p90 entre cuencas)")
 fig.tight_layout(); fig.savefig(OUT / "fig_autocorrelacion.png", dpi=200); plt.show()"""),
     ("md", r"""### 1b. Experimento: partición aleatoria contra cronológica
-Mismo modelo (Random Forest de 60 árboles), mismas 40 cuencas tomadas al azar y mismo número de días de evaluación. Solo cambia cómo se escogen esos días: **al azar** entre todos los días, o **el bloque final** de cada cuenca. Se usan solo los periodos de entrenamiento y validación; la prueba no se toca. Es una demostración de la partición, no un resultado del ítem 10."""),
+Se utiliza un mismo modelo (Random Forest de 60 árboles), mismas 40 cuencas tomadas al azar y mismo número de días de evaluación. Solo cambia cómo se escogen esos días: **al azar** entre todos los días, o **el bloque final** de cada cuenca. 
+
+Es importante aclarar que se usan solo los periodos de entrenamiento y validación; la prueba no se toca."""),
     ("code", r"""col_num, col_cat = pdat.columnas(est)
 COLS = col_num + col_cat
 X = pdat.agregar_estaticos(filas.drop(columns="region"), est)
@@ -110,7 +111,6 @@ texp["cuencas con NSE mejor que en la cronológica"] = ["—", int(exp["aleatori
 print(f"{len(d40):,} filas de 40 cuencas, {len(ev_crono):,} días de evaluación en cada caso")
 display(texp.round(3))"""),
     ("md", r"""**Lectura.** El caudal tiene mucha memoria: la autocorrelación mediana es 0,80 con un día de rezago, 0,53 a una semana y todavía 0,32 a un mes. Con la partición aleatoria el mismo Random Forest pasa de un NSE mediano de 0,41 a 0,60, y 39 de las 40 cuencas mejoran: **la mezcla aleatoria infla el NSE en casi 0,2** porque el modelo reconoce días casi iguales a los que vio. Por eso no se usa `KFold` con mezcla ni `train_test_split` sobre filas: todas las particiones de este notebook respetan el orden del tiempo o separan cuencas completas."""),
-
     ("md", r"""## 2. Partición temporal
 
 ### 2a. Por qué no la fecha fija del primer reporte
@@ -156,17 +156,16 @@ for p, c in COLOR_P.items(): ax.plot([], [], color=c, lw=3, label=p)
 ax.set(ylabel="Cuencas (ordenadas por inicio de la prueba)", yticks=[], title="Periodos de cada cuenca")
 ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(.5, -.06), ncol=3)
 fig.tight_layout(); fig.savefig(OUT / "fig_particion_temporal.png", dpi=200); plt.show()"""),
-    ("md", r"""**Lectura.** Las filas quedan en 63 / 18 / 18 % y no en 60/20/20 exacto: el corte se hace sobre los días con caudal válido, y después se pierden las filas cuya ventana de lluvia tiene huecos, que pesan más en validación y prueba. Las 248 cuencas tienen días en los tres conjuntos, con una mediana de unos 1.900 a 2.000 días (más de cinco años) de validación y de prueba por cuenca. Para la cuenca mediana la validación empieza en 2005 y la prueba en septiembre de 2013.
+    ("md", r"""**Lectura.** Las filas quedan en 63 / 18 / 18 % y no en 60/20/20 exacto. El corte se hace sobre los días con caudal válido, y después se pierden las filas cuya ventana de lluvia tiene huecos, que pesan más en validación y prueba. Las 248 cuencas tienen días en los tres conjuntos, con una mediana de unos 1.900 a 2.000 días (más de cinco años) de validación y de prueba por cuenca. Para la cuenca mediana la validación empieza en 2005 y la prueba en septiembre de 2013.
 
-**Limitación que va al informe.** Como cada cuenca se corta en su propia fecha, la prueba no es el mismo periodo del calendario para todas: empieza en 2001 o antes en el 10 % de las cuencas y después de noviembre de 2015 en otro 10 %. El KPI de prueba mezcla épocas climáticas distintas. A cambio, todas las cuencas se evalúan."""),
-
+**Limitación que va al informe.** Como cada cuenca se corta en su propia fecha, la prueba no es el mismo periodo del calendario para todas: empieza en 2001 o antes en el 10 % de las cuencas y después de noviembre de 2015 en otro 10 %. El KPI de prueba mezcla épocas climáticas distintas. A cambio, todas las cuencas se evalúan. La sección 3d comprueba que estos cortes no inflan el NSE espacial."""),
     ("md", r"""## 3. Validación cruzada espacial (cuencas sin estación)
-La partición temporal no responde P6: todas las cuencas de prueba también están en el entrenamiento. Para estimar el desempeño en una cuenca sin estación hay que **dejar cuencas completas por fuera** [2]. Se usan 5 folds: cada cuenca se evalúa una vez con un modelo que nunca la vio.
+La partición temporal no responde P2 pues todas las cuencas de prueba también están en el entrenamiento. Para estimar el desempeño en una cuenca sin estación hay que **dejar cuencas completas por fuera** [2]. Se usan 5 folds: cada cuenca se evalúa una vez con un modelo que nunca la vio.
 
 El riesgo son las **cuencas anidadas**: si una estación está aguas abajo de otra, gran parte de su caudal viene de la de arriba. Si una queda en entrenamiento y la otra en evaluación, el modelo ya vio buena parte de la respuesta y el resultado sale optimista [1].
 
 ### 3a. Cuencas anidadas
-La relación de anidamiento no viene en el dataset, pero se calcula con los polígonos de CAMELS-COL (archivo 03): para cada par de cuencas que se tocan, qué fracción del área de la pequeña está dentro de la grande."""),
+La relación de anidamiento no viene en el dataset, pero se calcula con los polígonos de CAMELS-COL: para cada par de cuencas que se tocan, qué fracción del área de la pequeña está dentro de la grande."""),
     ("code", r"""ids = list(est.index)
 poli = val.poligonos(ids)
 pares = val.pares_anidados(poli)
@@ -182,7 +181,7 @@ ax[0].hist(pares.frac_dentro, bins=40, color="#2a78d6"); ax[0].set(yscale="log",
 ax[1].hist(np.log10(dentro.rel_area), bins=40, color="#eb6834"); ax[1].axvline(np.log10(val.UMBRAL_ANIDADA), color="#555", ls=":")
 ax[1].set(xlabel="log10(área pequeña / área grande)", ylabel="Pares anidados", title="Qué parte de la grande drena la pequeña")
 fig.tight_layout(); fig.savefig(OUT / "fig_cuencas_anidadas.png", dpi=200); plt.show()"""),
-    ("md", r"""**Lectura.** Los polígonos no dejan dudas: cada par o está anidado (más del 95 % del área de la pequeña dentro de la grande) o apenas comparte el borde. Hay 1.044 pares anidados. Pero agrupar **toda** cuenca conectada, como proponía el primer reporte ("sistemas de ríos completos"), **no es viable**: las estaciones del Magdalena y el Cauca contienen a casi todas las demás de la región y forman un solo grupo de 130 cuencas, más de la mitad de los datos. Con un grupo así no se pueden armar 5 folds parecidos.
+    ("md", r"""**Lectura.** Los polígonos no dejan dudas: cada par o está anidado (más del 95 % del área de la pequeña dentro de la grande) o apenas comparte el borde. Hay 1.044 pares anidados. Pero agrupar **toda** cuenca conectada, como proponía el primer reporte ("sistemas de ríos completos"), **no es viable**: las estaciones del Magdalena y el Cauca contienen a casi todas las demás de la región y forman un solo grupo de 130 cuencas, más de la mitad de los datos. Con un grupo así no se pueden armar 5 folds parecidos. La sección 3e mide cuánto cambia el resultado si aun así se hace.
 
 ### 3b. Cuándo dos cuencas anidadas deben ir juntas
 Lo que filtra información no es que dos cuencas estén conectadas, sino **cuánto comparten**. Si una cuenca de 50 km² está dentro de una de 50.000 km², sus caudales casi no se parecen. Si la pequeña es la mitad de la grande, sí. Se unen en un mismo grupo solo los pares en que la pequeña es al menos una fracción $u$ del área de la grande, y se mide qué queda compartido entre entrenamiento y evaluación:
@@ -197,7 +196,7 @@ display(tu.rename(index={1.01: "sin agrupar"}).round(3))"""),
 **Decisión: $u$ = 0,2.** Es el menor umbral con el que el grupo más grande queda en 12 cuencas (5 %) y los folds quedan parejos (48 a 51 cuencas). Con este umbral solo **una** cuenca evaluada tiene más de la mitad de su área drenada por cuencas de entrenamiento, el percentil 90 de esa fracción es 0,2, y ninguna cuenca evaluada es el 20 % o más de una cuenca de entrenamiento que la contenga.
 
 ### 3c. Los 5 folds
-`StratifiedGroupKFold` de scikit-learn no parte ningún grupo y reparte las regiones de forma pareja entre folds. Qué grupos caen en cada fold depende de la semilla aleatoria, y con algunas semillas un fold queda con cuencas más bajas o más boscosas que el resto. Por eso se generan 50 particiones con semillas distintas y se escoge la de menor desequilibrio: el mayor estadístico KS entre las cuencas de un fold y las 248, sobre cuatro atributos (aridez, área, elevación media y bosque). **El criterio no usa el caudal ni ningún modelo**, y se fija antes de entrenar; el caudal medio queda como control independiente en la sección 4b."""),
+`StratifiedGroupKFold` de scikit-learn no parte ningún grupo y reparte las regiones de forma pareja entre folds. Se definen semillas para poder reproducir la ejecución, pero con algunas semillas un fold puede quedar con cuencas más bajas o más boscosas que el resto. Por eso se generan 50 particiones con semillas distintas y se escoge la de menor desequilibrio: el mayor estadístico KS entre las cuencas de un fold y las 248, sobre cuatro atributos (aridez, área, elevación media y bosque). **El criterio no usa el caudal ni ningún modelo**, y se fija antes de entrenar; el caudal medio queda como control independiente en la sección 4b."""),
     ("code", r"""grupo = val.grupos_conectados(ids, val.enlaces(pares))
 sem = val.escoger_semilla(grupo, region, est[["aridez", "log_area", "mean_ele", "forest_perc"]])
 SEMILLA_FOLDS = int(sem.index[0])
@@ -222,10 +221,70 @@ ax[1].set(title="Cobertura residual aguas arriba"); ax[1].set_axis_off()
 fig.tight_layout(); fig.savefig(OUT / "fig_folds_espaciales.png", dpi=200); plt.show()"""),
     ("md", r"""**Lectura.** La semilla importa: el mayor KS entre un fold y el total va de 0,17 a 0,35 según la semilla (0,32 con la semilla 42, que dejaba un fold más bajo y más boscoso que el resto). Se usa la **semilla 4**, la de menor desequilibrio. Los 5 folds tienen entre 48 y 51 cuencas y la misma mezcla de regiones (27–28 de Magdalena-Cauca, 8–9 del Caribe, 6–10 del Orinoco, 3–7 del Pacífico y 2–3 del Amazonas). La cobertura residual es baja: la mediana es 0, el percentil 90 es 0,21, solo una cuenca pasa de 0,5 (0,56) y ninguna cuenca evaluada es el 20 % o más de una cuenca de entrenamiento que la contiene.
 
-**Para el informe.** El Amazonas tiene 2 o 3 cuencas por fold y el Pacífico 3 a 7; la mediana regional de P6 en esas regiones es frágil y se debe presentar con el número de cuencas. Al reportar P6 conviene dar también la mediana del NSE en las cuencas con cobertura aguas arriba menor que 0,05, las más parecidas a una cuenca sin ninguna estación cerca."""),
+**Para el informe.** El Amazonas tiene 2 o 3 cuencas por fold y el Pacífico 3 a 7; la mediana regional de P2 en esas regiones es frágil y se debe presentar con el número de cuencas. Al reportar P2 conviene dar también la mediana del NSE en las cuencas con cobertura aguas arriba menor que 0,05, las más parecidas a una cuenca sin ninguna estación cerca."""),
+    ("md", r"""### 3d. ¿Los cortes por cuenca inflan el NSE espacial?
+Como la partición temporal corta cada cuenca en su propia fecha (sección 2), en la validación espacial las cuencas de entrenamiento tienen datos en las mismas fechas en que se evalúan las cuencas que quedaron fuera. Si un evento de lluvia regional (por ejemplo La Niña 2010–2011) entra al entrenamiento a través de las cuencas vecinas, el modelo podría acertar en la cuenca no vista por haber visto ese mismo periodo, y el NSE espacial saldría optimista.
 
+Primero se mide cuánto se comparten las fechas. Después se aísla el efecto con un experimento: las cuencas de cada fold se evalúan en sus días desde 2011 (inicio de la validación en la Tabla 4 del primer reporte), y las de los otros folds entrenan con el **mismo número de días por cuenca** tomados de tres lugares: solo antes de 2011 (ninguna fecha compartida), solo desde 2011 (las mismas fechas de la evaluación) o de cualquier fecha. Solo entran al entrenamiento las cuencas con datos a los dos lados de 2011, así que las tres variantes tienen las mismas cuencas y el mismo número de filas. Se usan Ridge y un gradient boosting con hiperparámetros por defecto, que es flexible y podría aprovechar las fechas compartidas. Si compartir fechas infla el NSE, la variante "mismas fechas" debe salir claramente mejor que "sin fechas compartidas"; la diferencia se mide cuenca por cuenca con bootstrap pareado (sección 5b)."""),
+    ("code", r"""comp_v = val.fechas_compartidas(X, fold)
+comp_p = val.fechas_compartidas(X, fold, periodo_eval="prueba", periodos_entrenamiento=("entrenamiento", "validacion"))
+display(pd.DataFrame({"paso 2: entrenamiento → validación": comp_v.median(), "paso 3: entrenamiento + validación → prueba": comp_p.median()})
+        .rename(index={"fraccion_compartida": "fracción de días evaluados cuya fecha está en el entrenamiento",
+                       "cuencas_misma_fecha": "cuencas de entrenamiento con dato ese día"})
+        .rename_axis("mediana por cuenca evaluada").round(2))
+
+pre = lambda: pdat.crear_preprocesamiento(col_num, col_cat)
+modelos_f = {"Ridge": Pipeline([("pre", pre()), ("modelo", Ridge(alpha=1))]),
+             "Gradient boosting": Pipeline([("pre", pre()), ("modelo", HistGradientBoostingRegressor(max_iter=200, random_state=0))])}
+tras = val.experimento_corte_comun(modelos_f, X, fold, COLS, corte="2011-01-01").reset_index()
+VAR = ["antes del corte (sin fechas compartidas)", "desde el corte (mismas fechas)", "cualquier fecha"]
+tab_f = tras.groupby(["modelo", "variante"]).NSE.median().unstack()[VAR]
+tab_f["cuencas evaluadas"] = tras.groupby("modelo").gauge_id.nunique()
+tab_f["filas de entrenamiento por fold"] = tras.groupby("modelo").filas_entrenamiento.mean().round(-3).astype(int)
+display(tab_f.round(3).rename_axis("NSE mediano espacial (evaluación desde 2011)"))
+pares_f = []
+for m_ in modelos_f:
+    r = tras[tras.modelo == m_].pivot_table(index="gauge_id", columns="variante", values="NSE")
+    for v in VAR[1:]:
+        pares_f.append(val.bootstrap_pareado(r[v], r[VAR[0]], grupo).drop("cumple").rename(f"{m_}: {v} − sin fechas compartidas"))
+display(pd.DataFrame(pares_f).round(3))
+tras.to_csv(OUT / "experimento_fechas_compartidas.csv", index=False)"""),
+    ("md", r"""**Lectura.** **Las fechas se comparten casi por completo.** En el paso 2, para la cuenca evaluada típica, el 100 % de sus días de validación cae en fechas que también están en el entrenamiento, con unas 13 cuencas de entrenamiento midiendo ese mismo día; en el paso 3 (prueba) la cifra baja a 66 % y 3 cuencas. **Pero eso no infla el NSE espacial.** Con el mismo conjunto de evaluación y el mismo número de días por cuenca, entrenar con las mismas fechas en lugar de solo con fechas anteriores cambia el NSE de cada cuenca en una mediana de +0,001 con Ridge (IC 95 %: −0,018 a 0,018) y de +0,000 con gradient boosting (−0,019 a 0,020), y la mitad de las cuencas mejora: el intervalo incluye 0 y el efecto queda por debajo del margen de 0,02 con el que se escoge el algoritmo. Las medianas de cada variante se mueven unas centésimas sin una dirección consistente; con gradient boosting la variante de mismas fechas es incluso la más baja. Entrenar con cualquier fecha da una ganancia pequeña (+0,004 y +0,010), que viene de tener años más variados en el entrenamiento y no de compartir fechas, porque la variante con solo las mismas fechas no la tiene.
+
+La razón es que el modelo no recibe el caudal de las cuencas vecinas ni el año, solo la meteorología y los atributos de la cuenca que predice: ver un evento en otra cuenca no le dice cuánto caudal produjo en esta. **Decisión:** se mantienen los cortes por cuenca en la validación espacial. La limitación de la sección 2b sigue en pie: la prueba mezcla épocas distintas entre cuencas."""),
+    ("md", r"""### 3e. Comprobación estricta: sistemas de ríos completos
+El primer reporte propone folds por sistemas de ríos completos, sin ninguna cuenca conectada entre entrenamiento y evaluación. La sección 3a mostró que eso no da 5 folds parejos: toda cuenca conectada forma 35 grupos, y uno reúne 130 cuencas del Magdalena-Cauca. Aun así se corre como comprobación: con esos grupos `StratifiedGroupKFold` arma folds sin ninguna área compartida, y se repite la línea base espacial (entrenamiento → validación) con los dos modelos de 3d.
+
+La diferencia con los folds de $u$ = 0,2 mezcla dos cosas: la información que todavía comparten las cuencas anidadas con $u$ = 0,2 y, en el fold que se lleva el sistema de 130 cuencas, que el modelo entrena casi sin cuencas de esa región. Por eso se separan las cuencas de ese sistema del resto."""),
+    ("code", r"""fold_s = val.folds_espaciales(g_todo, region, semilla=SEMILLA_FOLDS)
+display(pd.crosstab(fold_s, region, margins=True, margins_name="total")[ORDEN + ["total"]])
+print(f"Cobertura aguas arriba máxima con sistemas completos: {val.cobertura_residual(poli, pares, fold_s).aguas_arriba.max():.3f}")
+gigante = g_todo.index[g_todo == g_todo.value_counts().index[0]]
+sis = []
+for m_, mod in modelos_f.items():
+    for et, f_ in (("u = 0,2", fold), ("sistemas completos", fold_s)):
+        sis.append(val.evaluar_espacial(mod, X, f_, COLS, periodo_eval="validacion").assign(modelo=m_, folds=et))
+sis = pd.concat(sis).reset_index()
+tab_s, pares_s = {}, []
+for m_ in modelos_f:
+    r = sis[sis.modelo == m_].pivot_table(index="gauge_id", columns="folds", values="NSE")
+    en_g = r.index.isin(gigante)
+    for et, s in ((f"todas ({len(r)})", r), (f"sistema de {int(en_g.sum())} cuencas", r[en_g]), (f"resto ({int((~en_g).sum())})", r[~en_g])):
+        tab_s[(m_, et)] = s.median()
+        # con un solo conglomerado el remuestreo por grupos no varía: ahí se remuestrean cuencas sueltas
+        b = val.bootstrap_pareado(s["sistemas completos"], s["u = 0,2"], None if et.startswith("sistema") else g_todo)
+        pares_s.append(b.drop("cumple").rename(f"{m_}, {et}"))
+display(pd.DataFrame(tab_s).T[["u = 0,2", "sistemas completos"]].round(3).rename_axis(["modelo", "cuencas evaluadas"]))
+display(pd.DataFrame(pares_s).round(3).rename_axis("sistemas completos − u = 0,2"))
+sis.to_csv(OUT / "comprobacion_sistemas_completos.csv", index=False)"""),
+    ("md", r"""**Lectura.** Con sistemas completos no queda ninguna área compartida, pero los folds quedan muy desiguales: uno tiene 139 cuencas (las 130 del sistema Magdalena-Cauca y 9 más) y los otros entre 24 y 34. El NSE mediano espacial baja de 0,215 a 0,087 con Ridge y de 0,279 a 0,202 con gradient boosting.
+
+- **En las 118 cuencas fuera del sistema grande** el cambio mide sobre todo la información que todavía comparten las cuencas anidadas con $u$ = 0,2, porque el entrenamiento sigue teniendo cuencas de todas las regiones. La pérdida es de 0,06 de NSE por cuenca con Ridge (IC 95 %: 0,03 a 0,08) y de 0,02 con gradient boosting (IC 95 %: −0,002 a 0,05, que incluye 0).
+- **En las 130 cuencas del sistema grande** la caída es mayor (0,20 con Ridge y 0,10 con gradient boosting), pero ahí el modelo entrena con solo 6 cuencas del Magdalena-Cauca. La cifra mezcla la fuga con la falta de datos de la región y no se pueden separar; corresponde a una región entera sin estaciones, un caso más severo que el uso del producto.
+
+**Decisión.** Los folds de $u$ = 0,2 se mantienen para escoger el algoritmo, porque comparan a todos los modelos en las mismas condiciones y con folds parejos. Pero el NSE espacial con $u$ = 0,2 es algo optimista, así que **P2 se reporta como un rango**: la estimación principal con $u$ = 0,2 y la de sistemas completos como cota inferior. En el informe, "sistemas de ríos completos" pasa a ser esta comprobación y no la partición principal."""),
     ("md", r"""## 4. ¿Se conservan las distribuciones?
-La rúbrica pide comparar cada subconjunto **con el conjunto original**. Se usan dos medidas de tamaño del cambio, no pruebas de hipótesis: con millones de filas cualquier diferencia mínima da un valor p cercano a cero.
+Se va a comparar cada subconjunto **con el conjunto original**. Se usan dos medidas de tamaño del cambio, no pruebas de hipótesis: con millones de filas cualquier diferencia mínima da un valor p cercano a cero.
 - **Estadístico KS** ($D$): la mayor distancia entre las dos distribuciones acumuladas. $D$ = 0,05 quiere decir que, para cualquier valor, la proporción de filas por debajo de él difiere a lo sumo 5 puntos porcentuales.
 - **PSI** (índice de estabilidad poblacional): $\sum_i (s_i - t_i)\ln(s_i/t_i)$ sobre los deciles del conjunto total. Regla usual [3]: < 0,1 sin cambio, 0,1–0,25 cambio moderado, > 0,25 cambio grande.
 
@@ -261,7 +320,7 @@ fig.tight_layout(); fig.savefig(OUT / "fig_distribucion_temporal.png", dpi=200, 
 Las diferencias que sí aparecen son físicas y pequeñas: la validación es algo más húmeda (q mediano 2,54 frente a 2,34 mm/día del total) y la prueba es medio grado más cálida (Tmean media 19,1 frente a 18,6 °C), lo esperable si la prueba cae en los años más recientes. Hay que mencionarlo al interpretar el desempeño en prueba.
 
 ### 4b. Partición espacial (cuencas)
-En la validación espacial la unidad es la cuenca, así que se comparan atributos por cuenca: las cuencas de cada fold contra las 248. Con ~50 cuencas por fold el valor p de KS sí es informativo."""),
+En la validación espacial la unidad es la cuenca, así que se comparan atributos por cuenca, las cuencas de cada fold contra las 248. Con ~50 cuencas por fold el valor p de KS sí es informativo."""),
     ("code", r"""ATR = {"aridez": "aridez", "log_area": "log(área)", "mean_ele": "elevación media [m]", "forest_perc": "bosque [%]", "q_medio": "q medio [mm/día]"}
 cu = est[["aridez", "log_area", "mean_ele", "forest_perc"]].copy()
 cu["q_medio"] = filas.groupby("gauge_id").q.mean()
@@ -282,28 +341,32 @@ for a, (v, nombre) in zip(ax, ATR.items()):
     a.boxplot(datos, tick_labels=["total"] + [str(f) for f in range(val.N_FOLDS)], showfliers=False)
     a.set(title=nombre, xlabel="fold")
 fig.tight_layout(); fig.savefig(OUT / "fig_distribucion_espacial.png", dpi=200); plt.show()"""),
-    ("md", r"""**Lectura.** **Los folds representan bien al conjunto de cuencas.** Ninguna de las 25 comparaciones (5 atributos × 5 folds) da p < 0,05; el menor valor p es 0,15. El caudal medio, que no entró al criterio de la semilla, también se conserva (p ≥ 0,43), y la región está equilibrada por construcción (3c). Además, en una validación cruzada cada cuenca se evalúa exactamente una vez, así que el conjunto de cuencas evaluadas en P6 es el conjunto original completo."""),
-
+    ("md", r"""**Lectura.** **Los folds representan bien al conjunto de cuencas.** Ninguna de las 25 comparaciones (5 atributos × 5 folds) da p < 0,05 y el menor valor p es 0,15. El caudal medio, que no entró al criterio de la semilla, también se conserva (p ≥ 0,43), y la región está equilibrada por construcción (3c). Además, en una validación cruzada cada cuenca se evalúa exactamente una vez, así que el conjunto de cuencas evaluadas en P2 es el conjunto original completo."""),
     ("md", r"""## 5. Estrategia de selección del modelo
 
-**Algoritmos y grillas** (propuesta para el ítem 10; la rúbrica pide al menos tres algoritmos con varios conjuntos de hiperparámetros):
+**Algoritmos y grillas** propuestos, con su respectivo espacio de hiperparámetros:
 
 | Algoritmo | Hiperparámetros | Configuraciones |
 |---|---|---|
 | Regresión lineal con regularización (Ridge), línea base | `alpha` ∈ {0,1; 1; 10; 100} | 4 |
-| Random Forest | `max_depth` ∈ {10, 20, None}, `min_samples_leaf` ∈ {5, 20, 100}, `max_features` ∈ {0,33; 0,66}; 300 árboles | 18 |
-| Gradient boosting (`HistGradientBoostingRegressor`) | `learning_rate` ∈ {0,05; 0,1}, `max_leaf_nodes` ∈ {31, 127}, `min_samples_leaf` ∈ {20, 200}, `l2_regularization` ∈ {0, 1} | 16 |
+| Random Forest | `max_depth` ∈ {20, None}, `min_samples_leaf` ∈ {5, 50}, `max_features` ∈ {0,33; 0,66}; 100 árboles en la búsqueda y 300 en el modelo final | 8 |
+| Gradient boosting (`HistGradientBoostingRegressor`) | `learning_rate` ∈ {0,05; 0,1}, `max_leaf_nodes` ∈ {31, 127}, `min_samples_leaf` ∈ {20, 200}, `l2_regularization` ∈ {0, 1}; 500 iteraciones | 16 |
 | LSTM regional (solo si los docentes lo aprueban) | unidades ∈ {64, 128}, dropout ∈ {0,2; 0,4}; secuencia de 365 días | 4 |
 
 **Protocolo.** Todo modelo es un `Pipeline` con el preprocesamiento de `pdat.crear_preprocesamiento`, así que la imputación y la escala se ajustan solo con los datos de entrenamiento de cada corrida.
 1. **Hiperparámetros**: cada configuración se entrena con *entrenamiento* y se califica en *validación* con la **mediana del NSE por cuenca** (`val.buscar_hiperparametros`). Es lo mismo que `GridSearchCV` con `PredefinedSplit`, pero el puntaje de `GridSearchCV` mezcla todas las filas, y ese R² o error conjunto lo dominan las cuencas húmedas. Para el Random Forest y el boosting la búsqueda puede usar hasta 2.000 días de entrenamiento por cuenca (`construir_filas(..., n_por_cuenca_train=2000)`).
 2. **Algoritmo**: con la mejor configuración de cada uno se corre la validación cruzada espacial, entrenando con el periodo de entrenamiento de 4 folds y evaluando el periodo de validación del fold que queda fuera (`val.evaluar_espacial(..., periodo_eval="validacion")`). **Se escoge el algoritmo con mayor NSE mediano espacial**, porque el uso principal del producto son las cuencas sin estación. El NSE temporal de validación desempata; si dos algoritmos difieren en menos de 0,02, se prefiere el más simple.
-3. **Prueba, una sola vez**: con la elección congelada, se reentrena con *entrenamiento + validación* y se reportan sobre el periodo de *prueba*: el KPI temporal (P4), la validación espacial (P6, con `periodos_entrenamiento=("entrenamiento", "validacion")` y `periodo_eval="prueba"`) y las comparaciones P5 (t-test pareado del NSE por cuenca) y P7 (ANOVA por región). Si después de mirar la prueba se cambia algo, la prueba deja de ser independiente y hay que decirlo.
+3. **Prueba, una sola vez**: con la elección congelada, se reentrena con *entrenamiento + validación* y se reportan sobre el periodo de *prueba*: P1 en las cuencas vistas, P2 con la validación espacial (`periodos_entrenamiento=("entrenamiento", "validacion")` y `periodo_eval="prueba"`) y P3, la comparación entre modelos con **bootstrap pareado** de la diferencia de NSE por cuenca (`val.bootstrap_pareado`). Las medianas nacionales y por región se reportan con su intervalo del 95 % por bootstrap (`val.resumir_ic`); las regiones se comparan con esos intervalos y no con ANOVA (sección 5b). Si después de mirar la prueba se cambia algo, la prueba deja de ser independiente y hay que decirlo.
 
-**Métricas** (por cuenca, resumidas con la mediana nacional y por región [4]): NSE y KGE (1 es perfecto; NSE ≤ 0 no mejora al caudal medio), RMSE y MAE en mm/día. Para crecientes (P9): recall y precisión en los días por encima del percentil 95 de cada cuenca, con el umbral calculado en el periodo de entrenamiento.
+**Métricas** (por cuenca, resumidas con la mediana nacional y por región [4]): NSE y KGE (1 es perfecto; NSE ≤ 0 no mejora al caudal medio), RMSE y MAE en mm/día. 
+
+**KPIs de negocio** (Tabla 1 del primer reporte), calculados con las mismas predicciones:
+- **KPI 1, volumen mensual:** $EVM = \sum|V_{est} - V_{obs}| / \sum V_{obs}$ por cuenca, sumando los meses con al menos 25 días con dato. Como el área de la cuenca es fija, el cociente es el mismo con el caudal específico. Se reporta el % de cuencas con EVM ≤ 15 % (meta: ≥ 70 %) en las cuencas no vistas (P2), donde lo define el primer reporte, y también en las vistas, porque P1 lo exige.
+- **KPI 2, crecientes:** un día es de creciente si el caudal supera el percentil 95 de su cuenca, calculado con el caudal observado del periodo de entrenamiento y aplicado igual al observado y al estimado, así que no usa información de validación ni de prueba. Se reportan recall y precisión (metas: 0,70 y 0,50). Frente a no usar el modelo, con un beneficio $B$ por creciente detectada y un costo $C$ por falsa alarma, el valor esperado es $VE = VP \cdot B - FP \cdot C$, positivo cuando $C/B < \text{precisión}/(1 - \text{precisión})$. Mientras el profesional del sector no fije $B$ y $C$, se reporta esa razón de equilibrio.
+- **KPI 3, costo por cuenca cubierta:** el denominador es el número de cuencas no vistas con NSE ≥ 0,5 en la validación espacial. Los costos de desarrollo y operación quedan por validar con el profesional del sector.
 
 ### 5a. Línea base con el protocolo
-La regresión Ridge recorre los pasos 1 y 2. Sirve para comprobar que el protocolo funciona y deja la referencia del KPI "el mejor modelo supera a la regresión lineal". No toca la prueba."""),
+La regresión Ridge recorre los pasos 1 y 2. Sirve para comprobar que el protocolo funciona y deja la referencia de P3 (el modelo escogido frente a la regresión lineal) sin tocar la prueba."""),
     ("code", r"""tr, va = X[X.particion == "entrenamiento"], X[X.particion == "validacion"]
 ridge = Pipeline([("pre", pdat.crear_preprocesamiento(col_num, col_cat)), ("modelo", Ridge())])
 busq = val.buscar_hiperparametros(ridge, {"modelo__alpha": [0.1, 1, 10, 100]}, tr[COLS], tr.q, va[COLS], va.q, va.gauge_id)
@@ -321,17 +384,43 @@ print(f"NSE mediano espacial en las {len(sin_vecinas)} cuencas con cobertura agu
 met_t.join(met_e.add_suffix("_espacial")).to_csv(OUT / "linea_base_ridge_validacion.csv")"""),
     ("md", r"""**Lectura.** Con esta cantidad de filas la regularización casi no cambia nada (las cuatro `alpha` quedan entre 0,251 y 0,253); la búsqueda está para mostrar el mecanismo. La línea base deja un NSE mediano de validación de **0,25 en cuencas vistas y 0,22 en cuencas no vistas**, lejos de las metas de 0,70 y 0,50: hay espacio para que los modelos no lineales del ítem 10 muestren su aporte. El Orinoco es la región que mejor se estima en los dos casos (0,47 y 0,41) y el Caribe la peor (0,19 y 0,13).
 
-Dos cosas para el reporte de P6:
+Dos cosas para el reporte de P2:
 - En las 190 cuencas sin cuencas de entrenamiento aguas arriba (cobertura < 0,05) el NSE mediano espacial baja a 0,17. Esas cuencas son en su mayoría cabeceras pequeñas (área mediana de unos 620 km² frente a 18.300 km² del resto, y el 73 % no contiene ninguna otra estación), más difíciles por sí mismas, pero también son el caso más parecido a una cuenca sin ninguna estación cerca, así que la cifra debe ir junto a la mediana general.
 - El resultado espacial depende de cómo caen las cuencas en los folds: con la semilla 42 la misma línea base daba 0,18 en vez de 0,22. Conviene repetir la validación espacial del modelo final con dos o tres semillas más y reportar el rango."""),
+    ("md", r"""### 5b. Intervalos de confianza por bootstrap (P1, P2 y P3)
+El primer reporte pide acompañar cada resultado de un intervalo de confianza del 95 % por bootstrap y responder P3 con **bootstrap pareado** de la diferencia de NSE por cuenca, en lugar de pruebas t o ANOVA, que suponen normalidad. El NSE no la cumple: no tiene cota inferior y unas pocas cuencas con valores muy negativos dominan la media y la varianza [5].
 
-### 5b. Diagrama del protocolo"""),
+- **Medianas de P1 y P2, nacional y por región** (`val.resumir_ic`): se remuestrean cuencas con reemplazo 10.000 veces y el intervalo va del percentil 2,5 al 97,5 de las medianas remuestreadas.
+- **Comparación entre modelos, P3** (`val.bootstrap_pareado`): para cada cuenca se calcula la diferencia de NSE entre dos modelos evaluados en los mismos días, y se remuestrean esas diferencias. Criterio: el IC 95 % de la mejora mediana excluye 0 y la mejora mediana es ≥ 0,10.
+- **Cuencas anidadas:** no son independientes, así que se remuestrean por grupo de cuencas conectadas (los grupos de la sección 3), no cuenca por cuenca. El intervalo sale un poco más ancho, sin aparentar una precisión que los datos no tienen.
+
+Con la línea base se muestra el mecanismo. Como en este notebook todavía no hay un segundo modelo, la comparación pareada de ejemplo es la del mismo Ridge en cuencas vistas contra no vistas: cuánto NSE se pierde por no tener estación."""),
+    ("code", r"""C1, C2 = "P1: temporal (cuencas vistas)", "P2: espacial (cuencas no vistas)"
+ic = pd.concat({C1: val.resumir_ic(met_t, region, grupo), C2: val.resumir_ic(met_e, region, grupo)}, axis=1).loc[ORDEN + ["Nacional"]]
+display(ic.round(3))
+sin_g = val.bootstrap_mediana(met_t.NSE)
+print(f"IC 95 % del NSE temporal nacional: {sin_g.IC95_inf:.3f} a {sin_g.IC95_sup:.3f} remuestreando cuencas sueltas; "
+      f"{ic.loc['Nacional', (C1, 'IC95_inf')]:.3f} a {ic.loc['Nacional', (C1, 'IC95_sup')]:.3f} remuestreando grupos de cuencas anidadas")
+display(val.bootstrap_pareado(met_t.NSE, met_e.NSE, grupo).to_frame("Ridge: NSE temporal − NSE espacial"))
+
+fig, ax = plt.subplots(figsize=(8, 3.6))
+for col, color, dy in [(C1, "#2a78d6", -.12), (C2, "#eb6834", .12)]:
+    t = ic[col].iloc[::-1]
+    ax.errorbar(t.mediana, np.arange(len(t)) + dy, xerr=[t.mediana - t.IC95_inf, t.IC95_sup - t.mediana],
+                fmt="o", color=color, ms=4, capsize=2, label=col)
+ax.set(yticks=range(len(ic)), yticklabels=[f"{r} ({int(n)})" for r, n in zip(ic.index[::-1], ic[(C1, "cuencas")].iloc[::-1])],
+       xlabel="NSE mediano de la línea base Ridge (IC 95 %)", xlim=(-1, 1), title="Validación: mediana e intervalo por región")
+ax.axvline(0, color="#555", lw=.6); ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(.5, -.2), ncol=2, fontsize=8)
+fig.tight_layout(); fig.savefig(OUT / "fig_ic_bootstrap.png", dpi=200); plt.show()"""),
+    ("md", r"""**Lectura.** Los intervalos cambian lo que se puede afirmar por región. A nivel nacional la línea base tiene un NSE de 0,25 en cuencas vistas (IC 95 %: 0,21 a 0,33) y 0,22 en no vistas (0,12 a 0,28); los dos intervalos quedan lejos de las metas de 0,70 y 0,50. El Magdalena-Cauca (136 cuencas) y el Orinoco (37) tienen intervalos útiles, pero en el Amazonas (11 cuencas) el de P2 va de −2,06 a 0,73 (se sale del eje) y en el Pacífico (20) de −0,21 a 0,35. Ahí la mediana regional no permite concluir nada, y el informe debe mostrarla con su intervalo y el aviso de confianza baja que pide el primer reporte. Agrupar las cuencas anidadas ensancha el intervalo nacional de P1 de 0,22–0,31 a 0,21–0,33.
+
+La comparación de ejemplo muestra cómo se leerá P3: el Ridge pierde una mediana de 0,04 de NSE por cuenca al pasar a cuencas no vistas (IC 95 %: 0,02 a 0,06; el 77 % de las cuencas empeora). El intervalo excluye 0, así que la diferencia es real, pero es menor que 0,10: con el criterio de P3 sería una diferencia sin relevancia práctica."""),
     ("code", r"""pasos = [("Filas preparadas", f"{len(est)} cuencas\n{len(filas)/1e6:.2f} M filas", "#dfe8f5"),
          ("Partición temporal", "60/20/20 cronológico\npor cuenca", "#d9efe3"),
          ("Folds espaciales", f"{val.N_FOLDS} folds, {grupo.nunique()} grupos\nanidadas juntas (u = {str(val.UMBRAL_ANIDADA).replace('.', ',')})", "#d9efe3"),
          ("1. Hiperparámetros", "entrenamiento → validación\nNSE mediano por cuenca", "#fbe6d4"),
          ("2. Algoritmo", "CV espacial en validación\nNSE mediano", "#fbe6d4"),
-         ("3. Prueba (una vez)", "reentrenar con\nentrenamiento + validación\nP4, P5, P6, P7, P9", "#e8dcf5")]
+         ("3. Prueba (una vez)", "reentrenar con\nentrenamiento + validación\nP1, P2 y P3\ncon IC 95 % (bootstrap)", "#e8dcf5")]
 fig, ax = plt.subplots(figsize=(14, 2.4)); ax.axis("off")
 for i, (t, sub, c) in enumerate(pasos):
     x = i * 2.3
@@ -340,7 +429,6 @@ for i, (t, sub, c) in enumerate(pasos):
     if i < len(pasos) - 1: ax.annotate("", xy=(x + 2.3, .65), xytext=(x + 2.0, .65), arrowprops=dict(arrowstyle="->", color="#555"))
 ax.set_xlim(-.1, 13.9); ax.set_ylim(0, 1.3)
 fig.savefig(OUT / "fig_protocolo_seleccion.png", dpi=200, bbox_inches="tight"); plt.show()"""),
-
     ("md", r"""## 6. Archivos para el modelado
 Las filas no se guardan (se rehacen en segundos con `pdat.construir_filas`). Se guarda lo que define la partición, para que todos los modelos usen exactamente la misma."""),
     ("code", r"""fc.join(region).to_csv(OUT / "fechas_corte.csv")
@@ -358,29 +446,11 @@ X = pdat.agregar_estaticos(filas, est)
 fold = pd.read_csv(RAIZ / "salidas/particion/folds_espaciales.csv", dtype={"gauge_id": str}).set_index("gauge_id").fold
 busq = val.buscar_hiperparametros(modelo, grilla, X_tr, y_tr, X_val, y_val, g_val)                 # paso 1
 met_e = val.evaluar_espacial(mejor, X, fold, COLS, periodo_eval="validacion")                     # paso 2
-met_p6 = val.evaluar_espacial(mejor, X, fold, COLS, periodo_eval="prueba",
+met_p2 = val.evaluar_espacial(mejor, X, fold, COLS, periodo_eval="prueba",
                               periodos_entrenamiento=("entrenamiento", "validacion"))             # paso 3 (una vez)
+ic_p2 = val.resumir_ic(met_p2, region, grupo)                                                    # P1 y P2 con IC 95 %
+p3 = val.bootstrap_pareado(nse_modelo, nse_ridge, grupo)                                         # P3
 ```"""),
-
-    ("md", r"""## 7. Lo que pide el ítem 9
-
-| Lo que pide la rúbrica | Dónde |
-|---|---|
-| Estrategia de experimentación para entrenar y escoger el mejor modelo | sección 5 (protocolo, grillas, criterio, diagrama) |
-| Separar en entrenamiento, validación y prueba a partir de esa estrategia | secciones 2 (temporal) y 3 (espacial); archivos en la sección 6 |
-| Verificar que la distribución de los subconjuntos se conserva respecto al original | sección 4 (filas y cuencas, con KS y PSI) |
-
-**Cambios respecto al primer reporte** (hay que corregirlos en el informe final):
-- La prueba deja de ser 2016–2022 para todas las cuencas: es el 20 % final de cada cuenca (sección 2a).
-- La validación espacial no agrupa sistemas de ríos completos, porque el Magdalena-Cauca formaría un solo grupo con la mitad de las cuencas. Agrupa las cuencas anidadas que comparten al menos el 20 % del área, y reporta la cobertura que queda (sección 3).
-- El KPI "346 de 346 cuencas procesadas" ya no aplica: se modelan 248.
-
-**Limitaciones.**
-- La prueba temporal no es el mismo periodo del calendario para todas las cuencas y es algo más cálida que el entrenamiento.
-- En el Amazonas (11 cuencas) y el Pacífico (20) las medianas por región se calculan con pocas cuencas por fold.
-- La cobertura residual no es cero en todas las cuencas; P6 debe darse también en el subconjunto de cuencas sin vecinas de entrenamiento aguas arriba.
-- El NSE espacial cambia unas centésimas según la semilla de los folds (0,18 a 0,22 en la línea base); P6 se debe reportar con ese rango.
-- El experimento de la sección 1b usa 40 cuencas y un solo modelo: muestra el sesgo de la partición aleatoria, no su tamaño exacto en el modelo final."""),
 ]
 
 
